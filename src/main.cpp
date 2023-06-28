@@ -255,20 +255,22 @@ void setup() {
 void loop() {
 	if (!console) {
 		buzzStateMachine_buzzer();
-		if (digitalRead(BUZZER_IN_1)) {
-			buzzed = 0;
-		}
-		else if (digitalRead(BUZZER_IN_2)) {
-			buzzed = 1;
-		}
-		else if (digitalRead(BUZZER_IN_3)) {
-			buzzed = 2;
-		} 
-		else if (digitalRead(BUZZER_IN_4)) {
-			buzzed = 3;
-		}
-		if (buzzed != -1) {
-			buzzState = BUZZ_PENDING;
+			if (buzzed == -1) {
+			if (digitalRead(BUZZER_IN_1)) {
+				buzzed = 0;
+			}
+			else if (digitalRead(BUZZER_IN_2)) {
+				buzzed = 1;
+			}
+			else if (digitalRead(BUZZER_IN_3)) {
+				buzzed = 2;
+			} 
+			else if (digitalRead(BUZZER_IN_4)) {
+				buzzed = 3;
+			}
+			if (buzzed != -1) {
+				buzzState = BUZZ_PENDING;
+			}
 		}
 	}
 	if (console) {
