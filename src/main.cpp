@@ -5,7 +5,7 @@
 #include <esp_wifi.h>
 #include <Wire.h>
 
-const int DISCOVERY_DELAY = 250;
+const int BUZZ_LENGTH = 2000;
 
 const int MODE_PIN = 35;
 const int BUZZER_PIN = 25;
@@ -18,13 +18,19 @@ const int BUZZER_LED_3 = 15;
 const int BUZZER_IN_4 = 14;
 const int BUZZER_LED_4 = 13;
 
+const int bzLEDs[4] = {BUZZER_LED_1, BUZZER_LED_2, BUZZER_LED_3, BUZZER_LED_4};
+
 const int OLED_SDA = 21;
 const int OLED_SCL = 22;
 
-int buzzed;
+long timerStop = 0;
+
+int buzzed = -1;
 int pairing_index = 0;
 char id_letter;
 int id;
+
+bool lockdown = false;
 
 bool console = false;
 
@@ -40,8 +46,7 @@ typedef struct struct_message {
 	bool reset;
 	bool confirm;
 	uint8_t buzzer;
-	char buzzerName;
-
+	char console;
 } struct_message;
 
 typedef struct struct_pairing {
@@ -62,6 +67,9 @@ MessageType messagetype;
 
 enum PairingStatus {NOT_PAIRED, PAIR_REQUEST, PAIR_REQUESTED, PAIR_PAIRED,};
 PairingStatus pairingStatus = NOT_PAIRED;
+
+enum BuzzStates {NOT_BUZZED, BUZZ_PENDING, BUZZ_SUCCESSFUL, BUZZ_HOLDING, RESET,};
+BuzzStates buzzState = NOT_BUZZED;
 
 void consolePairing(const uint8_t * mac_addr, const uint8_t *incomingData, int len) { // do something similar for the buzzers
 	uint8_t type = incomingData[0];
@@ -146,6 +154,55 @@ bool addPeer_console(const uint8_t *peer_addr) {
 	}
 }
 
+void onBuzzResponse(const uint8_t * mac_addr, const uint8_t *incomingData, int len) {
+	uint8_t type = incomingData[0];
+	switch (type) {
+		case DATA:
+			memcpy(&responseData, incomingData, sizeof(incomingData));
+			if (responseData.id == 0 && responseData.console == id_letter) {
+				if(responseData.confirm) {
+					buzzState = BUZZ_SUCCESSFUL;
+				}
+				else if(responseData.reset) {
+					buzzState = RESET;
+				}
+			}
+	}
+}
+
+void buzzStateMachine_buzzer() {
+	switch (buzzState) {
+		case NOT_BUZZED:
+			break;
+		case BUZZ_PENDING:
+			buzzData.buzzer = buzzed;
+			buzzData.msgType = DATA;
+			buzzData.console = id_letter;
+			buzzData.id = id;
+			esp_now_send(addresses[0], (uint8_t *) &buzzData, sizeof(buzzData));
+			buzzState = NOT_BUZZED;
+			break;
+		case BUZZ_SUCCESSFUL:
+			digitalWrite(BUZZER_PIN, 1);
+			digitalWrite(bzLEDs[buzzed], 1);
+			if (millis() > timerStop) {
+				buzzState = BUZZ_HOLDING;
+			}
+			break;
+		case BUZZ_HOLDING:
+			digitalWrite(BUZZER_PIN, 0);
+		case RESET:
+			digitalWrite(BUZZER_PIN, 0);
+			digitalWrite(BUZZER_LED_1, 0);
+			digitalWrite(BUZZER_LED_2, 0);
+			digitalWrite(BUZZER_LED_3, 0);
+			digitalWrite(BUZZER_LED_4, 0);
+			buzzed = -1;
+			buzzState = NOT_BUZZED;
+			break;
+	}
+}
+
 void setup() {
 	
 	pinMode(MODE_PIN, INPUT);
@@ -182,9 +239,27 @@ void setup() {
 			esp_now_send(addresses[0], (uint8_t *) &pairingData, sizeof(pairingData));
 			pairingStatus = PAIR_REQUESTED;
 		}
+		esp_now_unregister_recv_cb();
 	}
 }
 
 void loop() {
-
+	if (!console) {
+		buzzStateMachine_buzzer();
+		if (digitalRead(BUZZER_IN_1)) {
+			buzzed = 0;
+		}
+		else if (digitalRead(BUZZER_IN_2)) {
+			buzzed = 1;
+		}
+		else if (digitalRead(BUZZER_IN_3)) {
+			buzzed = 2;
+		} 
+		else if (digitalRead(BUZZER_IN_4)) {
+			buzzed = 3;
+		}
+		if (buzzed != -1) {
+			buzzState = BUZZ_PENDING;
+		}
+	}
 }
