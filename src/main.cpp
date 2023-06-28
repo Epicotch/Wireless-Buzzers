@@ -6,6 +6,7 @@
 #include <Wire.h>
 
 const int BUZZ_LENGTH = 2000;
+const int DISCOVERY_TIMEOUT = 3000;
 
 const int MODE_PIN = 35;
 const int BUZZER_PIN = 25;
@@ -70,6 +71,8 @@ PairingStatus pairingStatus = NOT_PAIRED;
 
 enum BuzzStates {NOT_BUZZED, BUZZ_PENDING, BUZZ_SUCCESSFUL, BUZZ_HOLDING, RESET,};
 BuzzStates buzzState = NOT_BUZZED;
+
+void(* resetFunc) (void) = 0; //declare reset function @ address 0
 
 void consolePairing(const uint8_t * mac_addr, const uint8_t *incomingData, int len) { // do something similar for the buzzers
 	uint8_t type = incomingData[0];
@@ -161,6 +164,7 @@ void onBuzzResponse(const uint8_t * mac_addr, const uint8_t *incomingData, int l
 			memcpy(&responseData, incomingData, sizeof(incomingData));
 			if (responseData.id == 0 && responseData.console == id_letter) {
 				if(responseData.confirm) {
+					timerStop = millis() + BUZZ_LENGTH;
 					buzzState = BUZZ_SUCCESSFUL;
 				}
 				else if(responseData.reset) {
@@ -235,8 +239,13 @@ void setup() {
 		pairingData.msgType = PAIRING;
 		pairingData.id = id;
 		pairingData.channel = chan;
+		esp_now_send(addresses[0], (uint8_t *) &pairingData, sizeof(pairingData));
+		timerStop = DISCOVERY_TIMEOUT + millis();
 		while (pairingStatus != PAIR_PAIRED) {
-			esp_now_send(addresses[0], (uint8_t *) &pairingData, sizeof(pairingData));
+			if (millis() > timerStop) {
+				// could not find anything
+				resetFunc();
+			}
 			pairingStatus = PAIR_REQUESTED;
 		}
 		esp_now_unregister_recv_cb();
@@ -261,5 +270,8 @@ void loop() {
 		if (buzzed != -1) {
 			buzzState = BUZZ_PENDING;
 		}
+	}
+	if (console) {
+		// do the console logic in here
 	}
 }
