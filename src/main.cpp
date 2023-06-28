@@ -23,12 +23,14 @@ const int OLED_SCL = 22;
 
 int buzzed;
 int pairing_index = 0;
+char id_letter;
+int id;
 
 bool console = false;
 
 esp_now_peer_info_t buzzerConsole;
 
-uint8_t addresses[4][6] = {{0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, {0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, {0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, {0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
+uint8_t addresses[4][6] = {{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, {0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, {0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, {0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
 char letters[] = {'A', 'B', 'C', 'D'};
 int chan = 1;
 
@@ -61,7 +63,7 @@ MessageType messagetype;
 enum PairingStatus {NOT_PAIRED, PAIR_REQUEST, PAIR_REQUESTED, PAIR_PAIRED,};
 PairingStatus pairingStatus = NOT_PAIRED;
 
-void consolePairing(const uint8_t * mac_addr, const uint8_t *incomingData, int len) {
+void consolePairing(const uint8_t * mac_addr, const uint8_t *incomingData, int len) { // do something similar for the buzzers
 	uint8_t type = incomingData[0];
 	switch (type) {
 		case PAIRING: // pairing confirmed
@@ -77,7 +79,47 @@ void consolePairing(const uint8_t * mac_addr, const uint8_t *incomingData, int l
 					addPeer_console(mac_addr);
 				}
 			}
+			break;
+		case DATA:
+			Serial.println("huh");
+			break;
 	}
+}
+
+void buzzerPairing(const uint8_t * mac_addr, const uint8_t *incomingData, int len) {
+	uint8_t type = incomingData[0];
+	switch (type) {
+		case PAIRING:
+			memcpy(&pairingData, incomingData, sizeof(pairingData));
+			if (pairingData.id == 0) {
+				if (pairingData.msgType == PAIRING) {
+					id_letter = pairingData.assigned_letter;
+					id = pairingData.assigned_id;
+					chan = pairingData.channel;
+					addPeer_buzzer(pairingData.macAddr, pairingData.channel);
+					pairingStatus = PAIR_PAIRED;
+				}
+			}
+			break;
+		case DATA:
+			Serial.println("huh");
+			break;
+	}
+}
+
+void addPeer_buzzer(const uint8_t * mac_addr, uint8_t chan) {
+	esp_now_peer_info_t peer;
+	ESP_ERROR_CHECK(esp_wifi_set_channel(chan, WIFI_SECOND_CHAN_NONE));
+	esp_now_del_peer(mac_addr);
+	memset(&peer, 0, sizeof(esp_now_peer_info_t));
+	peer.channel = chan;
+	peer.encrypt = 0;
+	memcpy(peer.peer_addr, mac_addr, sizeof(uint8_t[6]));
+	if (esp_now_add_peer(&peer) != ESP_OK) {
+		Serial.println("Failed to add peer");
+		return;
+	}
+	memcpy(addresses[0], mac_addr, sizeof(uint8_t[6]));
 }
 
 bool addPeer_console(const uint8_t *peer_addr) {
@@ -130,6 +172,16 @@ void setup() {
 		while (digitalRead(BUZZER_IN_1) || pairing_index != 4) {
 		}
 		esp_now_unregister_recv_cb();
+	}
+	else {
+		esp_now_register_recv_cb(buzzerPairing);
+		pairingData.msgType = PAIRING;
+		pairingData.id = id;
+		pairingData.channel = chan;
+		while (pairingStatus != PAIR_PAIRED) {
+			esp_now_send(addresses[0], (uint8_t *) &pairingData, sizeof(pairingData));
+			pairingStatus = PAIR_REQUESTED;
+		}
 	}
 }
 
