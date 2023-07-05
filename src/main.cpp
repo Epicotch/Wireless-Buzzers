@@ -5,8 +5,8 @@
 #include <esp_wifi.h>
 #include <Wire.h>
 
-const int BUZZ_LENGTH = 2000;
-const int DISCOVERY_TIMEOUT = 3000;
+const long BUZZ_LENGTH = 2000L;
+const long DISCOVERY_TIMEOUT = 3000L;
 
 const int MODE_PIN = 35;
 const int BUZZER_PIN = 25;
@@ -24,7 +24,7 @@ const int bzLEDs[4] = {BUZZER_LED_1, BUZZER_LED_2, BUZZER_LED_3, BUZZER_LED_4};
 const int OLED_SDA = 21;
 const int OLED_SCL = 22;
 
-long timerStop = 0;
+unsigned long timerStopTime = (long) 0;
 
 int buzzed = -1;
 int pairing_index = 0;
@@ -74,6 +74,46 @@ BuzzStates buzzState = NOT_BUZZED;
 
 void(* resetFunc) (void) = 0; //declare reset function @ address 0
 
+
+void addPeer_buzzer(const uint8_t * mac_addr, uint8_t chan) {
+	esp_now_peer_info_t peer;
+	ESP_ERROR_CHECK(esp_wifi_set_channel(chan, WIFI_SECOND_CHAN_NONE));
+	esp_now_del_peer(mac_addr);
+	memset(&peer, 0, sizeof(esp_now_peer_info_t));
+	peer.channel = chan;
+	peer.encrypt = 0;
+	memcpy(peer.peer_addr, mac_addr, sizeof(uint8_t[6]));
+	if (esp_now_add_peer(&peer) != ESP_OK) {
+		Serial.println("Failed to add peer");
+		return;
+	}
+	memcpy(addresses[0], mac_addr, sizeof(uint8_t[6]));
+}
+
+bool addPeer_console(const uint8_t *peer_addr) {
+	memset(&buzzerConsole, 0, sizeof(buzzerConsole));
+	const esp_now_peer_info_t *peer = &buzzerConsole;
+	memcpy(buzzerConsole.peer_addr, peer_addr, 6);
+	memcpy(addresses[pairing_index], buzzerConsole.peer_addr, 6);
+
+	buzzerConsole.channel = chan;
+	buzzerConsole.encrypt = 0;
+
+	bool exists = esp_now_is_peer_exist(buzzerConsole.peer_addr);
+	if (exists) {
+		return true;
+	}
+	else {
+		esp_err_t pairStatus = esp_now_add_peer(peer);
+		if (pairStatus == ESP_OK) {
+			return true;
+		}
+		else {
+			return false;
+		}
+	}
+}
+
 void consolePairing(const uint8_t * mac_addr, const uint8_t *incomingData, int len) { // do something similar for the buzzers
 	uint8_t type = incomingData[0];
 	switch (type) {
@@ -118,45 +158,6 @@ void buzzerPairing(const uint8_t * mac_addr, const uint8_t *incomingData, int le
 	}
 }
 
-void addPeer_buzzer(const uint8_t * mac_addr, uint8_t chan) {
-	esp_now_peer_info_t peer;
-	ESP_ERROR_CHECK(esp_wifi_set_channel(chan, WIFI_SECOND_CHAN_NONE));
-	esp_now_del_peer(mac_addr);
-	memset(&peer, 0, sizeof(esp_now_peer_info_t));
-	peer.channel = chan;
-	peer.encrypt = 0;
-	memcpy(peer.peer_addr, mac_addr, sizeof(uint8_t[6]));
-	if (esp_now_add_peer(&peer) != ESP_OK) {
-		Serial.println("Failed to add peer");
-		return;
-	}
-	memcpy(addresses[0], mac_addr, sizeof(uint8_t[6]));
-}
-
-bool addPeer_console(const uint8_t *peer_addr) {
-	memset(&buzzerConsole, 0, sizeof(buzzerConsole));
-	const esp_now_peer_info_t *peer = &buzzerConsole;
-	memcpy(buzzerConsole.peer_addr, peer_addr, 6);
-	memcpy(addresses[pairing_index], buzzerConsole.peer_addr, 6);
-
-	buzzerConsole.channel = chan;
-	buzzerConsole.encrypt = 0;
-
-	bool exists = esp_now_is_peer_exist(buzzerConsole.peer_addr);
-	if (exists) {
-		return true;
-	}
-	else {
-		esp_err_t pairStatus = esp_now_add_peer(peer);
-		if (pairStatus == ESP_OK) {
-			return true;
-		}
-		else {
-			return false;
-		}
-	}
-}
-
 void onBuzzResponse(const uint8_t * mac_addr, const uint8_t *incomingData, int len) {
 	uint8_t type = incomingData[0];
 	switch (type) {
@@ -164,13 +165,61 @@ void onBuzzResponse(const uint8_t * mac_addr, const uint8_t *incomingData, int l
 			memcpy(&responseData, incomingData, sizeof(incomingData));
 			if (responseData.id == 0 && responseData.console == id_letter) {
 				if(responseData.confirm) {
-					timerStop = millis() + BUZZ_LENGTH;
+					timerStopTime = millis() + BUZZ_LENGTH;
 					buzzState = BUZZ_SUCCESSFUL;
 				}
 				else if(responseData.reset) {
 					buzzState = RESET;
 				}
 			}
+			break;
+		case PAIRING:
+			Serial.println("what the fu");
+			break;
+	}
+}
+
+void onBuzz(const uint8_t * mac_addr, const uint8_t *incomingData, int len) {
+	uint8_t type = incomingData[0];
+	int found = 0;
+	for (int i; i < 4; ++i) {
+		for (int j; j < 6; ++i) {
+			if (mac_addr[j] == addresses[i][j]) {
+				found++;
+			}
+		}
+	}
+	if (found != 6) {
+		return;
+	}
+	switch (type) {
+		case DATA:
+			memcpy(&responseData, incomingData, sizeof(incomingData));
+			if (responseData.id != 0) {
+				if (buzzState != NOT_BUZZED) {
+					buzzed = responseData.id;
+					buzzData.id = 0;
+					buzzData.msgType = DATA;
+					buzzData.console = 'E';
+					buzzData.confirm = true;
+					buzzData.reset = false;
+					buzzData.buzzer = responseData.id;
+					esp_now_send(mac_addr, (uint8_t *) &buzzData, sizeof(buzzData));
+					buzzState = BUZZ_SUCCESSFUL;
+					}
+				else {
+					buzzData.id = 0;
+					buzzData.msgType = DATA;
+					buzzData.console = 'E';
+					buzzData.confirm = false;
+					buzzData.reset = true;
+					buzzData.buzzer = responseData.id;
+					esp_now_send(mac_addr, (uint8_t *) &buzzData, sizeof(buzzData));
+				}
+			}
+			break;
+		case PAIRING:
+			break;
 	}
 }
 
@@ -189,7 +238,7 @@ void buzzStateMachine_buzzer() {
 		case BUZZ_SUCCESSFUL:
 			digitalWrite(BUZZER_PIN, 1);
 			digitalWrite(bzLEDs[buzzed], 1);
-			if (millis() > timerStop) {
+			if (millis() > timerStopTime) {
 				buzzState = BUZZ_HOLDING;
 			}
 			break;
@@ -204,6 +253,31 @@ void buzzStateMachine_buzzer() {
 			buzzed = -1;
 			buzzState = NOT_BUZZED;
 			break;
+	}
+}
+
+void buzzStateMachine_console() {
+	switch (buzzState) {
+		case NOT_BUZZED:
+			break;
+		case BUZZ_PENDING:
+			break;
+		case BUZZ_SUCCESSFUL:
+			break;
+		case BUZZ_HOLDING:
+			break;
+		case RESET:
+			buzzed = -1;
+			buzzData.id = 0;
+			buzzData.console = 'E';
+			buzzData.confirm = false;
+			buzzData.reset = true;
+			buzzData.msgType = DATA;
+			buzzData.buzzer = -1;
+			for (int i; i < 4; ++i) {
+				esp_now_send(addresses[i], (uint8_t *) &buzzData, sizeof(buzzData));
+			}
+			buzzState = NOT_BUZZED;
 	}
 }
 
@@ -233,6 +307,7 @@ void setup() {
 		while (digitalRead(BUZZER_IN_1) || pairing_index != 4) {
 		}
 		esp_now_unregister_recv_cb();
+		esp_now_register_recv_cb(onBuzz);
 	}
 	else {
 		esp_now_register_recv_cb(buzzerPairing);
@@ -240,22 +315,23 @@ void setup() {
 		pairingData.id = id;
 		pairingData.channel = chan;
 		esp_now_send(addresses[0], (uint8_t *) &pairingData, sizeof(pairingData));
-		timerStop = DISCOVERY_TIMEOUT + millis();
+		timerStopTime = DISCOVERY_TIMEOUT + millis();
 		while (pairingStatus != PAIR_PAIRED) {
-			if (millis() > timerStop) {
+			if (millis() > timerStopTime) {
 				// could not find anything
 				resetFunc();
 			}
 			pairingStatus = PAIR_REQUESTED;
 		}
 		esp_now_unregister_recv_cb();
+		esp_now_register_recv_cb(onBuzzResponse);
 	}
 }
 
 void loop() {
 	if (!console) {
 		buzzStateMachine_buzzer();
-			if (buzzed == -1) {
+		if (buzzed == -1) {
 			if (digitalRead(BUZZER_IN_1)) {
 				buzzed = 0;
 			}
@@ -275,5 +351,8 @@ void loop() {
 	}
 	if (console) {
 		// do the console logic in here
+		if (digitalRead(BUZZER_IN_1)) {
+			buzzState = RESET;
+		}
 	}
 }
