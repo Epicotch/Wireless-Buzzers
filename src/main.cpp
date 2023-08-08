@@ -4,6 +4,10 @@
 #include <algorithm>
 #include <esp_wifi.h>
 #include <Wire.h>
+#include <SPI.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 
 const long BUZZ_LENGTH = 2000L;
 const long DISCOVERY_TIMEOUT = 3000L;
@@ -23,6 +27,12 @@ const int bzLEDs[4] = {BUZZER_LED_1, BUZZER_LED_2, BUZZER_LED_3, BUZZER_LED_4};
 
 const int OLED_SDA = 21;
 const int OLED_SCL = 22;
+
+const int SCREEN_WIDTH = 128;
+const int SCREEN_HEIGHT = 64;
+
+const int OLED_RESET = -1;
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 unsigned long timerStopTime = (long) 0;
 
@@ -106,6 +116,7 @@ bool addPeer_console(const uint8_t *peer_addr) {
 	else {
 		esp_err_t pairStatus = esp_now_add_peer(peer);
 		if (pairStatus == ESP_OK) {
+			display.println("Connected " + letters[pairing_index]);
 			return true;
 		}
 		else {
@@ -167,6 +178,7 @@ void onBuzzResponse(const uint8_t * mac_addr, const uint8_t *incomingData, int l
 				if(responseData.confirm) {
 					timerStopTime = millis() + BUZZ_LENGTH;
 					buzzState = BUZZ_SUCCESSFUL;
+					display.println(id_letter + buzzed);
 				}
 				else if(responseData.reset) {
 					buzzState = RESET;
@@ -206,6 +218,7 @@ void onBuzz(const uint8_t * mac_addr, const uint8_t *incomingData, int len) {
 					buzzData.buzzer = responseData.id;
 					esp_now_send(mac_addr, (uint8_t *) &buzzData, sizeof(buzzData));
 					buzzState = BUZZ_SUCCESSFUL;
+					display.println(responseData.console + responseData.buzzer);
 					}
 				else {
 					buzzData.id = 0;
@@ -252,6 +265,8 @@ void buzzStateMachine_buzzer() {
 			digitalWrite(BUZZER_LED_4, 0);
 			buzzed = -1;
 			buzzState = NOT_BUZZED;
+			display.clearDisplay();
+			display.setCursor(10, 10);
 			break;
 	}
 }
@@ -278,11 +293,18 @@ void buzzStateMachine_console() {
 				esp_now_send(addresses[i], (uint8_t *) &buzzData, sizeof(buzzData));
 			}
 			buzzState = NOT_BUZZED;
+			display.clearDisplay();
+			display.setCursor(10, 10);
 	}
 }
 
 void setup() {
-	
+	if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+		Serial.println(F("Failed to start OLED"));
+		resetFunc();
+	}
+	display.clearDisplay();
+	delay(2000);
 	pinMode(MODE_PIN, INPUT);
 	pinMode(BUZZER_PIN, OUTPUT);
 	pinMode(BUZZER_IN_1, INPUT);
@@ -293,7 +315,6 @@ void setup() {
 	pinMode(BUZZER_LED_3, OUTPUT);
 	pinMode(BUZZER_IN_4, INPUT);
 	pinMode(BUZZER_LED_4, OUTPUT);
-
 	console = !digitalRead(MODE_PIN);
 
 	Serial.begin(115200);
@@ -303,13 +324,18 @@ void setup() {
 		return;
 	}
 	if (console) {
+		display.setCursor(10, 10);
+		display.setTextSize(3);
+		Serial.println("Console mode");
 		esp_now_register_recv_cb(consolePairing);
 		while (digitalRead(BUZZER_IN_1) || pairing_index != 4) {
 		}
 		esp_now_unregister_recv_cb();
 		esp_now_register_recv_cb(onBuzz);
+		display.clearDisplay();
 	}
 	else {
+		Serial.println("Buzzer mode");
 		esp_now_register_recv_cb(buzzerPairing);
 		pairingData.msgType = PAIRING;
 		pairingData.id = id;
@@ -319,13 +345,19 @@ void setup() {
 		while (pairingStatus != PAIR_PAIRED) {
 			if (millis() > timerStopTime) {
 				// could not find anything
+				Serial.println("Unable to find console, retrying...");
 				resetFunc();
 			}
 			pairingStatus = PAIR_REQUESTED;
 		}
+		Serial.println("Found console!");
+		display.setTextSize(6);
+		display.println("Connected!");
 		esp_now_unregister_recv_cb();
 		esp_now_register_recv_cb(onBuzzResponse);
 	}
+	display.clearDisplay();
+	display.setTextSize(10);
 }
 
 void loop() {
