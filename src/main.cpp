@@ -10,7 +10,7 @@
 #include <Adafruit_SSD1306.h>
 
 const long BUZZ_LENGTH = 2000L;
-const long DISCOVERY_TIMEOUT = 3000L;
+const long DISCOVERY_TIMEOUT = 600L;
 
 const int MODE_PIN = 35;
 const int BUZZER_PIN = 25;
@@ -36,28 +36,28 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 unsigned long timerStopTime = (long) 0;
 
-int buzzed = -1;
-int pairing_index = 0;
+uint8_t buzzed = 100;
+uint8_t pairing_index = 0;
+int found = 0;
+bool match = false;
 char id_letter;
-int id;
-
-bool lockdown = false;
+uint8_t id;
+bool resetting = false;
 
 bool console = false;
 
-esp_now_peer_info_t buzzerConsole;
+bool resetPrev = false;
 
+esp_now_peer_info_t buzzerConsole;
 uint8_t addresses[4][6] = {{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, {0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, {0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, {0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
-char letters[] = {'A', 'B', 'C', 'D'};
-int chan = 1;
+char letters[4] = {'A', 'B', 'C', 'D'};
+int chan = 4;
 
 typedef struct struct_message {
 	uint8_t msgType;
 	uint8_t id;
-	bool reset;
-	bool confirm;
 	uint8_t buzzer;
-	char console;
+	uint8_t macAddr[6];
 } struct_message;
 
 typedef struct struct_pairing {
@@ -66,16 +66,14 @@ typedef struct struct_pairing {
 	uint8_t macAddr[6];
 	uint8_t channel;
 	uint8_t assigned_id;
-	char assigned_letter;
 } struct_pairing;
 
 struct_message responseData;
 struct_message buzzData;
 struct_pairing pairingData;
 
-enum MessageType {PAIRING, DATA,};
+enum MessageType {PAIRING, DATA, REDO, CONFIRM,};
 MessageType messagetype;
-
 enum PairingStatus {NOT_PAIRED, PAIR_REQUEST, PAIR_REQUESTED, PAIR_PAIRED,};
 PairingStatus pairingStatus = NOT_PAIRED;
 
@@ -87,7 +85,6 @@ void(* resetFunc) (void) = 0; //declare reset function @ address 0
 
 void addPeer_buzzer(const uint8_t * mac_addr, uint8_t chan) {
 	esp_now_peer_info_t peer;
-	ESP_ERROR_CHECK(esp_wifi_set_channel(chan, WIFI_SECOND_CHAN_NONE));
 	esp_now_del_peer(mac_addr);
 	memset(&peer, 0, sizeof(esp_now_peer_info_t));
 	peer.channel = chan;
@@ -104,7 +101,7 @@ bool addPeer_console(const uint8_t *peer_addr) {
 	memset(&buzzerConsole, 0, sizeof(buzzerConsole));
 	const esp_now_peer_info_t *peer = &buzzerConsole;
 	memcpy(buzzerConsole.peer_addr, peer_addr, 6);
-	memcpy(addresses[pairing_index], buzzerConsole.peer_addr, 6);
+	memcpy(addresses[pairing_index], peer_addr, 6);
 
 	buzzerConsole.channel = chan;
 	buzzerConsole.encrypt = 0;
@@ -117,29 +114,43 @@ bool addPeer_console(const uint8_t *peer_addr) {
 		esp_err_t pairStatus = esp_now_add_peer(peer);
 		if (pairStatus == ESP_OK) {
 			display.println("Connected " + letters[pairing_index]);
+			display.display();
 			return true;
 		}
 		else {
+			Serial.println(esp_err_to_name(pairStatus));
 			return false;
 		}
 	}
 }
 
-void consolePairing(const uint8_t * mac_addr, const uint8_t *incomingData, int len) { // do something similar for the buzzers
+void printMAC(const uint8_t * mac_addr){
+	char macStr[18];
+	snprintf(macStr, sizeof(macStr), "%02x:%02x:%02x:%02x:%02x:%02x",
+           mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
+	Serial.print(macStr);
+}
+
+void consolePairing(const uint8_t * mac_addr, const uint8_t *incomingData, int len) {
 	uint8_t type = incomingData[0];
+	Serial.println("Recieved ping");
 	switch (type) {
 		case PAIRING: // pairing confirmed
+			Serial.println("Type pairing");
 			memcpy(&pairingData, incomingData, sizeof(pairingData));
-			if (pairingData.id == -1) {
-				if (pairingData.msgType == PAIRING) {
-					pairingData.id = 0;
-					WiFi.macAddress(pairingData.macAddr);
-					pairingData.channel = chan;
-					pairingData.assigned_letter = letters[pairing_index];
-					pairingData.assigned_id = ++pairing_index;
-					esp_err_t result = esp_now_send(mac_addr, (uint8_t *) &pairingData, sizeof(pairingData));
-					addPeer_console(mac_addr);
-				}
+			Serial.println("ID = " + pairingData.id);
+			if (pairingData.id == 100) {
+				Serial.print("Sending pairing response to ");
+				printMAC(mac_addr);
+				Serial.println("\n");
+				pairingData.id = 0;
+				WiFi.macAddress(pairingData.macAddr);
+				pairingData.channel = chan;
+				addPeer_console(mac_addr);
+				pairingData.assigned_id = ++pairing_index;
+				Serial.println(esp_err_to_name(esp_now_send(mac_addr, (uint8_t *) &pairingData, sizeof(pairingData))));
+				Serial.print("Current pairing index: ");
+				Serial.println(pairing_index);
 			}
 			break;
 		case DATA:
@@ -150,17 +161,20 @@ void consolePairing(const uint8_t * mac_addr, const uint8_t *incomingData, int l
 
 void buzzerPairing(const uint8_t * mac_addr, const uint8_t *incomingData, int len) {
 	uint8_t type = incomingData[0];
+	Serial.println("Recieved response");
 	switch (type) {
 		case PAIRING:
+			Serial.println("Type pairing");
 			memcpy(&pairingData, incomingData, sizeof(pairingData));
 			if (pairingData.id == 0) {
-				if (pairingData.msgType == PAIRING) {
-					id_letter = pairingData.assigned_letter;
-					id = pairingData.assigned_id;
-					chan = pairingData.channel;
-					addPeer_buzzer(pairingData.macAddr, pairingData.channel);
-					pairingStatus = PAIR_PAIRED;
-				}
+				Serial.println("ID 0");
+				id_letter = letters[pairingData.assigned_id - 1];
+				id = pairingData.assigned_id;
+				chan = pairingData.channel;
+				addPeer_buzzer(mac_addr, pairingData.channel);
+				pairingStatus = PAIR_PAIRED;
+				Serial.print("Assigned");
+				Serial.println(id_letter);
 			}
 			break;
 		case DATA:
@@ -171,62 +185,95 @@ void buzzerPairing(const uint8_t * mac_addr, const uint8_t *incomingData, int le
 
 void onBuzzResponse(const uint8_t * mac_addr, const uint8_t *incomingData, int len) {
 	uint8_t type = incomingData[0];
+	Serial.println("Buzzer ping");
 	switch (type) {
 		case DATA:
+			break;
+		case REDO:
+			Serial.println("Type reset");
 			memcpy(&responseData, incomingData, sizeof(incomingData));
-			if (responseData.id == 0 && responseData.console == id_letter) {
-				if(responseData.confirm) {
-					timerStopTime = millis() + BUZZ_LENGTH;
-					buzzState = BUZZ_SUCCESSFUL;
-					display.println(id_letter + buzzed);
-				}
-				else if(responseData.reset) {
-					buzzState = RESET;
-				}
+			if (responseData.id == 0) {
+				Serial.println("From console");
+				buzzState = RESET;
+			}
+			break;
+		case CONFIRM:
+			Serial.println("Type confirm");
+			Serial.println(responseData.buzzer);
+			memcpy(&responseData, incomingData, sizeof(incomingData));
+			if (responseData.id == 0) {
+				Serial.println("Successful buzz");
+				timerStopTime = millis() + BUZZ_LENGTH;
+				buzzState = BUZZ_SUCCESSFUL;
 			}
 			break;
 		case PAIRING:
-			Serial.println("what the fu");
+			Serial.println("hm");
 			break;
 	}
 }
 
 void onBuzz(const uint8_t * mac_addr, const uint8_t *incomingData, int len) {
 	uint8_t type = incomingData[0];
-	int found = 0;
-	for (int i; i < 4; ++i) {
-		for (int j; j < 6; ++i) {
-			if (mac_addr[j] == addresses[i][j]) {
-				found++;
-			}
-		}
-	}
-	if (found != 6) {
-		return;
-	}
+	Serial.println("Recieved onBuzz ping");
 	switch (type) {
 		case DATA:
 			memcpy(&responseData, incomingData, sizeof(incomingData));
+			Serial.println("Data!");
+			match = false;
+			for (int i = 0; i < 4; i++) {
+				found = 0;
+				for (int j = 0; j < 6; j++) {
+					Serial.printf("Comparing %02x to %02x\n", mac_addr[j], addresses[i][j]);
+					if (mac_addr[j] == addresses[i][j]) {
+						found++;
+					}
+					if (buzzState == RESET) {
+						break;
+					}
+				}
+				if (buzzState == RESET) {
+					break;
+				}
+				if (found == 6) {
+					match = true;
+					break;
+				}
+				Serial.print("Matched ");
+				Serial.println(found);
+			}
+			if (buzzState == RESET) {
+				break;
+			}
+			if (!match) {
+				Serial.println("No match");
+				break;
+			}
+			Serial.println("MAC address match");
 			if (responseData.id != 0) {
-				if (buzzState != NOT_BUZZED) {
+				Serial.println("From buzzer!");
+				if (buzzState == NOT_BUZZED && digitalRead(BUZZER_IN_1)) {
+					Serial.println("Good buzz");
+					display.setCursor(44, 18);
+					display.setTextSize(5);
+					display.setTextColor(WHITE);
+					Serial.print(letters[responseData.id - 1]);
+					Serial.println(responseData.buzzer + 1);
+					display.print(letters[responseData.id - 1]);
+					display.print(responseData.buzzer + 1);
+					display.display();
 					buzzed = responseData.id;
 					buzzData.id = 0;
-					buzzData.msgType = DATA;
-					buzzData.console = 'E';
-					buzzData.confirm = true;
-					buzzData.reset = false;
-					buzzData.buzzer = responseData.id;
-					esp_now_send(mac_addr, (uint8_t *) &buzzData, sizeof(buzzData));
+					buzzData.msgType = CONFIRM;
+					buzzData.buzzer = responseData.buzzer;
+					WiFi.macAddress(buzzData.macAddr);
+					Serial.println(esp_err_to_name(esp_now_send(mac_addr, (uint8_t *) &buzzData, sizeof(buzzData))));
 					buzzState = BUZZ_SUCCESSFUL;
-					display.println(responseData.console + responseData.buzzer);
 					}
 				else {
 					buzzData.id = 0;
-					buzzData.msgType = DATA;
-					buzzData.console = 'E';
-					buzzData.confirm = false;
-					buzzData.reset = true;
-					buzzData.buzzer = responseData.id;
+					buzzData.msgType = REDO;
+					buzzData.buzzer = responseData.buzzer;
 					esp_now_send(mac_addr, (uint8_t *) &buzzData, sizeof(buzzData));
 				}
 			}
@@ -243,9 +290,13 @@ void buzzStateMachine_buzzer() {
 		case BUZZ_PENDING:
 			buzzData.buzzer = buzzed;
 			buzzData.msgType = DATA;
-			buzzData.console = id_letter;
+			WiFi.macAddress(buzzData.macAddr);
+			Serial.printf("This MAC: %02x:%02x:%02x:%02x:%02x:%02x\n", buzzData.macAddr[0], buzzData.macAddr[1], buzzData.macAddr[2], buzzData.macAddr[3], buzzData.macAddr[4], buzzData.macAddr[5]);
 			buzzData.id = id;
-			esp_now_send(addresses[0], (uint8_t *) &buzzData, sizeof(buzzData));
+			Serial.print("Buzz on ");
+			Serial.print(letters[id - 1]);
+			Serial.println(buzzData.buzzer + 1);
+			Serial.println(esp_err_to_name(esp_now_send(addresses[0], (uint8_t *) &buzzData, sizeof(buzzData))));
 			buzzState = NOT_BUZZED;
 			break;
 		case BUZZ_SUCCESSFUL:
@@ -257,16 +308,16 @@ void buzzStateMachine_buzzer() {
 			break;
 		case BUZZ_HOLDING:
 			digitalWrite(BUZZER_PIN, 0);
+			break;
 		case RESET:
+			Serial.println("Resetting!");
 			digitalWrite(BUZZER_PIN, 0);
 			digitalWrite(BUZZER_LED_1, 0);
 			digitalWrite(BUZZER_LED_2, 0);
 			digitalWrite(BUZZER_LED_3, 0);
 			digitalWrite(BUZZER_LED_4, 0);
-			buzzed = -1;
+			buzzed = 100;
 			buzzState = NOT_BUZZED;
-			display.clearDisplay();
-			display.setCursor(10, 10);
 			break;
 	}
 }
@@ -282,29 +333,41 @@ void buzzStateMachine_console() {
 		case BUZZ_HOLDING:
 			break;
 		case RESET:
-			buzzed = -1;
+			if (resetting) break;
+			Serial.println("Resetting");
+			buzzed = 100;
 			buzzData.id = 0;
-			buzzData.console = 'E';
-			buzzData.confirm = false;
-			buzzData.reset = true;
-			buzzData.msgType = DATA;
-			buzzData.buzzer = -1;
-			for (int i; i < 4; ++i) {
-				esp_now_send(addresses[i], (uint8_t *) &buzzData, sizeof(buzzData));
+			buzzData.msgType = REDO;
+			buzzData.buzzer = 100;
+			resetting = true;
+			for (int i; i < pairing_index; i++) {
+				Serial.print("Resetting buzzer ");
+				Serial.print(i + 1);
+				Serial.print(" at ");
+				Serial.printf("%02x:%02x:%02x:%02x:%02x:%02x\n", addresses[i][0], addresses[i][1], addresses[i][2], addresses[i][3], addresses[i][4], addresses[i][5]);
+				noInterrupts();
+				Serial.println(esp_err_to_name(esp_now_send(addresses[i], (uint8_t *) &buzzData, sizeof(buzzData))));
+				interrupts();
 			}
+			resetting = false;
 			buzzState = NOT_BUZZED;
 			display.clearDisplay();
-			display.setCursor(10, 10);
+			display.display();
+			break;
 	}
 }
 
 void setup() {
+	Serial.begin(115200);
 	if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-		Serial.println(F("Failed to start OLED"));
-		resetFunc();
+		Serial.println("Failed to start OLED");
+		for(;;);
 	}
+	display.setTextColor(WHITE);
 	display.clearDisplay();
-	delay(2000);
+	display.setTextSize(2);
+	display.setCursor(0, 5);
+	display.display();
 	pinMode(MODE_PIN, INPUT);
 	pinMode(BUZZER_PIN, OUTPUT);
 	pinMode(BUZZER_IN_1, INPUT);
@@ -317,74 +380,98 @@ void setup() {
 	pinMode(BUZZER_LED_4, OUTPUT);
 	console = !digitalRead(MODE_PIN);
 
-	Serial.begin(115200);
 	WiFi.mode(WIFI_STA);
 	if (esp_now_init() != ESP_OK) {
 		Serial.println("Error initializing ESP-NOW");
+		display.setTextSize(3);
+		display.println("ESP-NOW failed!");
+		display.display();
 		return;
 	}
+	Serial.println(esp_err_to_name(esp_wifi_set_channel(chan, WIFI_SECOND_CHAN_NONE)));
+	display.clearDisplay();
 	if (console) {
-		display.setCursor(10, 10);
-		display.setTextSize(3);
+		//display.setCursor(5, 5);
+		//display.setTextSize(3);
 		Serial.println("Console mode");
-		esp_now_register_recv_cb(consolePairing);
-		while (digitalRead(BUZZER_IN_1) || pairing_index != 4) {
-		}
-		esp_now_unregister_recv_cb();
-		esp_now_register_recv_cb(onBuzz);
+		display.println("Console\nmode");
+		display.display();
+		Serial.println(esp_err_to_name(esp_now_register_recv_cb(consolePairing)));
+		while (digitalRead(BUZZER_IN_1) && !(pairing_index == 4)) {}
+		Serial.println("Starting game cycle");
+		Serial.println(esp_err_to_name(esp_now_unregister_recv_cb()));
+		Serial.println(esp_err_to_name(esp_now_register_recv_cb(onBuzz)));
+		display.setTextSize(5);
 		display.clearDisplay();
 	}
 	else {
 		Serial.println("Buzzer mode");
-		esp_now_register_recv_cb(buzzerPairing);
+		display.println("Buzzer\nmode");
+		id = 100;
+		display.display();
+		Serial.println(esp_err_to_name(esp_now_register_recv_cb(buzzerPairing)));
+		addPeer_buzzer(addresses[0], chan);
 		pairingData.msgType = PAIRING;
 		pairingData.id = id;
 		pairingData.channel = chan;
-		esp_now_send(addresses[0], (uint8_t *) &pairingData, sizeof(pairingData));
+		Serial.println(esp_err_to_name(esp_now_send(addresses[0], (uint8_t *) &pairingData, sizeof(pairingData))));
 		timerStopTime = DISCOVERY_TIMEOUT + millis();
+		pairingStatus = PAIR_REQUESTED;
 		while (pairingStatus != PAIR_PAIRED) {
 			if (millis() > timerStopTime) {
 				// could not find anything
 				Serial.println("Unable to find console, retrying...");
 				resetFunc();
 			}
-			pairingStatus = PAIR_REQUESTED;
 		}
 		Serial.println("Found console!");
-		display.setTextSize(6);
 		display.println("Connected!");
-		esp_now_unregister_recv_cb();
-		esp_now_register_recv_cb(onBuzzResponse);
+		display.display();
+		Serial.println(esp_err_to_name(esp_now_unregister_recv_cb()));
+		Serial.println(esp_err_to_name(esp_now_register_recv_cb(onBuzzResponse)));
+		display.setTextSize(5);
+		display.clearDisplay();
+		display.setCursor(54, 18);
+		display.print(letters[id - 1]);
 	}
-	display.clearDisplay();
-	display.setTextSize(10);
+	display.display();
+	buzzState = NOT_BUZZED;
 }
 
 void loop() {
+	//Serial.println("loop weeeeeeeee");
 	if (!console) {
 		buzzStateMachine_buzzer();
-		if (buzzed == -1) {
-			if (digitalRead(BUZZER_IN_1)) {
+		if (buzzed == 100) {
+			if (!digitalRead(BUZZER_IN_1)) {
 				buzzed = 0;
 			}
-			else if (digitalRead(BUZZER_IN_2)) {
+			else if (!digitalRead(BUZZER_IN_2)) {
 				buzzed = 1;
 			}
-			else if (digitalRead(BUZZER_IN_3)) {
+			else if (!digitalRead(BUZZER_IN_3)) {
 				buzzed = 2;
 			} 
-			else if (digitalRead(BUZZER_IN_4)) {
+			else if (!digitalRead(BUZZER_IN_4)) {
 				buzzed = 3;
 			}
-			if (buzzed != -1) {
+			if (buzzed != 100) {
 				buzzState = BUZZ_PENDING;
 			}
+			Serial.print(!digitalRead(BUZZER_IN_1));
+			Serial.print(!digitalRead(BUZZER_IN_2));
+			Serial.print(!digitalRead(BUZZER_IN_3));
+			Serial.println(!digitalRead(BUZZER_IN_4));
+			Serial.print("Current buzz: ");
+			Serial.println(buzzed);
 		}
 	}
 	if (console) {
 		// do the console logic in here
-		if (digitalRead(BUZZER_IN_1)) {
+		buzzStateMachine_console();
+		if (!digitalRead(BUZZER_IN_1) && resetPrev) {
 			buzzState = RESET;
 		}
+		resetPrev = digitalRead(BUZZER_IN_1);
 	}
 }
