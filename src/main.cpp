@@ -9,7 +9,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
-const long BUZZ_LENGTH = 2000L;
+const long BUZZ_LENGTH = 1000L;
 const long DISCOVERY_TIMEOUT = 600L;
 
 const int MODE_PIN = 35;
@@ -19,7 +19,7 @@ const int BUZZER_LED_1 = 19;
 const int BUZZER_IN_2 = 18;
 const int BUZZER_LED_2 = 17;
 const int BUZZER_IN_3 = 16;
-const int BUZZER_LED_3 = 15;
+const int BUZZER_LED_3 = 26;
 const int BUZZER_IN_4 = 14;
 const int BUZZER_LED_4 = 13;
 
@@ -216,6 +216,8 @@ void onBuzzResponse(const uint8_t * mac_addr, const uint8_t *incomingData, int l
 void onBuzz(const uint8_t * mac_addr, const uint8_t *incomingData, int len) {
 	uint8_t type = incomingData[0];
 	Serial.println("Recieved onBuzz ping");
+	if (buzzState == RESET) 
+		return;
 	switch (type) {
 		case DATA:
 			memcpy(&responseData, incomingData, sizeof(incomingData));
